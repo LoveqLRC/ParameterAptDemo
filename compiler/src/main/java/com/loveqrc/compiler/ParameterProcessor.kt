@@ -5,7 +5,6 @@ import com.loveqrc.annotation.Parameter
 import com.squareup.javapoet.ClassName
 import com.squareup.javapoet.ParameterSpec
 import com.squareup.javapoet.TypeName
-import com.sun.tools.javac.parser.ParserFactory
 import javax.annotation.processing.*
 import javax.lang.model.SourceVersion
 import javax.lang.model.element.Element
@@ -13,6 +12,11 @@ import javax.lang.model.element.TypeElement
 import javax.lang.model.util.Elements
 import javax.lang.model.util.Types
 import javax.tools.Diagnostic
+import com.squareup.javapoet.TypeSpec
+
+import com.squareup.javapoet.JavaFile
+import javax.lang.model.element.Modifier
+
 
 //注册注解处理器 Processor::class
 @AutoService(Processor::class)
@@ -83,28 +87,32 @@ class ParameterProcessor : AbstractProcessor() {
         if (elements.isEmpty()) {
             return false
         }
-        //获取注解的值
+        //获取注解的值,将其存起来
         valueOfParameterMap(elements)
         //生成对应的类文件
+        createParameterFile()
 
         return true
     }
 
     private fun createParameterFile() {
-        if (tempParameterMap.isEmpty()){
+        if (tempParameterMap.isEmpty()) {
             return
         }
         //通过Element工具类，获取对应的类型
-        var activityType  = elementUtils.getTypeElement(Constants.ACTIVITY)  as TypeElement
-        var parameterType = elementUtils.getTypeElement(Constants.PARAMETER_LOAD) as TypeElement
+        val activityType = elementUtils.getTypeElement(Constants.ACTIVITY) as TypeElement
+        //获取要实现的接口的类型
+        val parameterType = elementUtils.getTypeElement(Constants.PARAMETER_LOAD) as TypeElement
 
-        // 参数体配置(Object target)
+        //  配置loadParameter方法的(Object target)参数
         val parameterSpec: ParameterSpec =
-            ParameterSpec.builder(TypeName.OBJECT, Constants.PARAMETER_NAMR).build()
+            ParameterSpec.builder(TypeName.OBJECT, Constants.PARAMETER_NAME).build()
 
+        //每一个entry对应一个Activity
         tempParameterMap.entries.forEach {
             val typeElement = it.key
-            if (typeUtils.isSubtype(typeElement.asType(),activityType.asType())){
+            //如果不是在Activity中使用，那么就没意义了
+            if (!typeUtils.isSubtype(typeElement.asType(), activityType.asType())) {
                 throw RuntimeException("@Parameter only support for activity")
             }
 
@@ -112,11 +120,39 @@ class ParameterProcessor : AbstractProcessor() {
             val className = ClassName.get(typeElement)
 
             // 方法体内容构建
-            val factory: ParameterFactory = Builder(parameterSpec)
+            val factory = ParameterFactory.Builder(parameterSpec)
                 .setMessager(messager)
                 .setClassName(className)
                 .build()
 
+            // 添加方法体内容的第一行
+            //MainActivity t = (MainActivity) target;
+            factory.addFirstStatement()
+
+            // 遍历类里面所有属性
+            for (fieldElement in it.value) {
+                factory.buildStatement(fieldElement)
+            }
+
+
+            // 最终生成的类文件名（类名Parameter）
+            val finalClassName = typeElement.simpleName.toString() + Constants.PARAMETER_FILE_NAME
+            messager.printMessage(
+                Diagnostic.Kind.NOTE, "APT生成获取参数类文件：" +
+                        className.packageName() + "." + finalClassName
+            )
+
+            // MainActivity$$Parameter
+            JavaFile.builder(
+                className.packageName(),  // 包名
+                TypeSpec.classBuilder(finalClassName) // 类名
+                    .addSuperinterface(ClassName.get(parameterType)) // 实现ParameterLoad接口
+                    .addModifiers(Modifier.PUBLIC) // public修饰符
+                    .addMethod(factory.build()) // 方法的构建（方法参数 + 方法体）
+                    .build()
+            ) // 类构建完成
+                .build() // JavaFile构建完成
+                .writeTo(filer) // 文件生成器开始生成类文件
 
 
         }
@@ -126,6 +162,7 @@ class ParameterProcessor : AbstractProcessor() {
     private fun valueOfParameterMap(elements: MutableSet<out Element>) {
         elements.forEach {
             messager.printMessage(Diagnostic.Kind.NOTE, it.simpleName)
+            //获取当前element的父类
             val enclosingElement = it.enclosingElement as TypeElement
             // example:
             //class MainActivity : AppCompatActivity() {
